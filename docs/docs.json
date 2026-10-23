@@ -340,6 +340,10 @@
                         ]
                       },
                       {
+                        "page": "reference/drivers/kubernetes-openshell-compute",
+                        "label": "Kubernetes + OpenShell"
+                      },
+                      {
                         "page": "reference/drivers/ssh-compute",
                         "label": "SSH"
                       },
@@ -1083,6 +1087,7 @@
               "flows/harness-execution-topology",
               "flows/compute-driver-lifecycle-hooks",
               "flows/openshell-sandbox-provisioning",
+              "flows/openshell-managed-workload",
               "flows/credential-source-lifecycle",
               "flows/credential-source-refresh",
               "flows/driver-plugin-loading",

@@ -18,6 +18,8 @@ import "google/protobuf/struct.proto";
 import "google/protobuf/timestamp.proto";
 
 service OpenShell {
+  rpc StopSandbox(SandboxLifecycleRequest) returns (SandboxResponse);
+  rpc StartSandbox(SandboxLifecycleRequest) returns (SandboxResponse);
   // Config reads require config:read; mutation requires config:write and workspace admin.
   rpc GetDraftPolicy(GetDraftPolicyRequest) returns (GetDraftPolicyResponse);
   rpc GetSandboxPolicyStatus(GetSandboxPolicyStatusRequest) returns (GetSandboxPolicyStatusResponse);
@@ -1261,4 +1263,28 @@ message SandboxPolicyRevision {
 message CredentialConnector {
   string path = 1;
   string sha256 = 2;
+}
+
+// Local managed-workspace prototype: NVIDIA/OpenShell PR #4624 plus its local
+// workload-update extension. Do not advertise this as a released capability.
+service SandboxUpdates {
+  rpc UpdateSandbox(UpdateSandboxRequest) returns (SandboxResponse);
+}
+message SandboxLifecycleRequest {
+  string name = 1;
+  WorkspaceSelector workspace_scope = 2;
+  string request_id = 3;
+}
+message SandboxCommandUpdate { repeated string argv = 1; }
+message SandboxMapUpdate { map<string, string> values = 1; }
+message UpdateSandboxRequest {
+  WorkspaceSelector workspace_scope = 1;
+  string name = 2;
+  optional string image = 3;
+  uint64 expected_resource_version = 4;
+  string request_id = 5;
+  SandboxCommandUpdate command = 6;
+  SandboxMapUpdate environment = 7;
+  SandboxMapUpdate labels = 8;
+  SandboxMapUpdate annotations = 9;
 }

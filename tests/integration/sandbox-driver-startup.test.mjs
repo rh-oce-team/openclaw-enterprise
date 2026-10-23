@@ -23,6 +23,10 @@ import {
   createKubernetesComputeDriver,
   KubernetesComputeDriver,
 } from "../../apps/controller/src/drivers/compute/kubernetes/index.ts";
+import {
+  KubernetesOpenShellComputeDriver,
+  ManagedOpenShellSandbox,
+} from "../../apps/controller/src/drivers/compute/kubernetes-openshell/index.ts";
 import { OpenShellCredentialRefreshDriver } from "../../apps/controller/src/drivers/credential-refresh/openshell.ts";
 import {
   AGENT_RUNTIME_ENTRYPOINT,
@@ -461,6 +465,14 @@ function codexRequirements(revision, environment = []) {
       path: "token",
       readOnly: true,
     },
+    retainedDirectories: [
+      {
+        purpose: "workspace",
+        name: "workspace",
+        path: "/home/node/workspace",
+        environment: "OPENCLAW_WORKSPACE_DIR",
+      },
+    ],
     workspaceMounts: [
       {
         claimName: "harness-workspace-codex",
@@ -534,6 +546,23 @@ function runtimeSandboxFixture(
     loginMode: "api_key",
     image: "openclaw-runtime@sha256:synthetic",
     command: harnessRuntimeCommand('console.error("harness runtime");'),
+    retainedDirectories: [
+      {
+        purpose: "workspace",
+        name: "workspace",
+        path: "/home/node/workspace",
+        environment: "OPENCLAW_WORKSPACE_DIR",
+      },
+      {
+        purpose: "node-state",
+        name: "workspace-node-codex",
+        path: "/home/node/.openclaw-node",
+        environment: "OPENCLAW_NODE_STATE_DIR",
+      },
+      ...(harnessId === "codex"
+        ? [{ purpose: "sessions", name: "codex-sessions", path: "/home/node/.codex/sessions" }]
+        : []),
+    ],
     workspaceMounts: [
       {
         claimName: "harness-workspace-codex",
@@ -608,6 +637,8 @@ test("startup constructs the bundled OpenShell SandboxDriver before constructing
   assert.equal(createdDriver.installation.drivers.sandbox.id, "openshell-sandbox");
   assert.equal(createdDriver.installation.drivers.sandbox.implementation, "openshell");
   assert.ok(createdDriver.sandboxDriver instanceof OpenShellSandboxDriver);
+  assert.equal(createdDriver.installation.drivers.compute.implementation, "occ/kubernetes");
+  assert.equal(createdDriver.computeDriver.constructor, KubernetesComputeDriver);
   assert.equal(createdDriver.sandboxDriver.id, "openshell-sandbox");
   assert.deepEqual(createdDriver.sandboxDriver.facets, ["networking", "filesystem", "process"]);
 
@@ -616,6 +647,105 @@ test("startup constructs the bundled OpenShell SandboxDriver before constructing
   assert.doesNotThrow(() =>
     createControllerWorker({ pool, mode: "production", drivers: createdDriver, emit: () => {} }),
   );
+});
+
+test("startup automatically selects managed OpenShell Compute and refuses embedded execution", async (t) => {
+  const configuration = sandboxInstallation();
+  configuration.drivers.compute.configuration.managedOpenShell = {
+    experimentalSingleWorker: true,
+    gatewayId: "managed-test",
+  };
+  configuration.drivers.sandbox.configuration.gateway = { workspaceMode: "managed" };
+  configuration.drivers.sandbox.configuration.kubernetes.sandboxDataMount.mountPath =
+    "/sandbox/oce/workspace";
+  const composed = await loadInstallationFile(t, configuration);
+  assert.equal(composed.installation.drivers.compute.id, "compute-kubernetes");
+  assert.equal(composed.computeDriver.id, "compute-kubernetes");
+  assert.ok(composed.computeDriver instanceof KubernetesOpenShellComputeDriver);
+  assert.ok(composed.sandboxDriver instanceof ManagedOpenShellSandbox);
+  assert.equal(composed.installation.drivers.compute.implementation, "occ/kubernetes-openshell");
+  assert.throws(
+    () => composed.computeDriver.validateHarnessAuth({ id: "openclaw", mode: "embedded" }),
+    /requires a dedicated Harness/,
+  );
+  // Automatic selection must still validate the managed path's required settings.
+  delete configuration.drivers.compute.configuration.managedOpenShell;
+  await assert.rejects(loadInstallationFile(t, configuration), (error) => {
+    assert.ok(error instanceof SharedConfigurationValidationError);
+    assert.ok(error.error.details.some((detail) => detail.code === "REQUIRED"));
+    return true;
+  });
+});
+
+test("managed Harness rendering submits no PVC and keeps the bootstrap outside persistent state", async () => {
+  const client = workspaceGatewayClient();
+  const configuration = sandboxInstallation().drivers.sandbox.configuration;
+  configuration.gateway = { workspaceMode: "managed" };
+  configuration.kubernetes.sandboxDataMount.mountPath = "/sandbox/oce/workspace";
+  const driver = new ManagedOpenShellSandbox(configuration, {
+    id: "openshell-sandbox",
+    backend: backendFor(client),
+    gatewayId: "test-gateway",
+  });
+  let request;
+  let phase = "SANDBOX_PHASE_PROVISIONING";
+  client.createSandbox = async (value) => {
+    request = value;
+    return storedSandbox(value, { phase: "SANDBOX_PHASE_PROVISIONING" });
+  };
+  client.getSandbox = async () =>
+    request === undefined ? undefined : storedSandbox(request, { phase, resourceVersion: "7" });
+  client.getService = async () =>
+    harnessService(request.name, "", "http://codex.example.test:8080/");
+  const { context, revision, requirements } = runtimeSandboxFixture(driver);
+  requirements.workspaceMounts = [];
+  // Matching a directory path does not make an unrelated variable a storage binding.
+  requirements.environment.push({ name: "UNRELATED_PATH", value: "/home/node/.openclaw-node" });
+  await driver.ensureNamespace(context);
+  await driver.provisionHarness({ ...context, revision, requirements });
+  // This is outgoing workload-contract proof, with transport responses supplied
+  // by the fixture. Cluster storage and provider lifecycle remain a live proof.
+  assert.equal(JSON.stringify(request.spec).includes("persistent_volume_claim"), false);
+  assert.equal(JSON.stringify(request.spec).includes("harness-workspace-codex"), false);
+  assert.equal(request.spec.environment.OPENCLAW_WORKSPACE_DIR, "/sandbox/oce/workspace");
+  assert.equal(
+    request.spec.environment.OPENCLAW_NODE_STATE_DIR,
+    "/sandbox/oce/workspace-node-codex/state",
+  );
+  assert.equal(
+    request.spec.environment.UNRELATED_PATH,
+    "/sandbox/.openclaw-runtime/home/.openclaw-node",
+  );
+  assert.match(
+    request.spec.command[RUNTIME_WRAPPER_COMMAND.length],
+    /require\("\/opt\/oce\/runtime\/openshell-bootstrap.cjs"\)\.prepareManaged/,
+  );
+  const successor = { ...revision, id: "rev_00000000-0000-4000-8000-000000000004" };
+  assert.equal(
+    driver.harnessResource({ namespace: context.namespace, revision }).resourceName,
+    driver.harnessResource({ namespace: context.namespace, revision: successor }).resourceName,
+  );
+  // A server with the older image-only update contract can acknowledge an update
+  // while retaining command/environment/metadata. Readback must prevent StartSandbox.
+  phase = "SANDBOX_PHASE_STOPPED";
+  let attemptedUpdate;
+  client.updateSandbox = async (update) => {
+    attemptedUpdate = update;
+    return storedSandbox(request, { phase, resourceVersion: "8" });
+  };
+  client.startSandbox = async () => {
+    assert.fail("An incomplete workload update must never start");
+  };
+  await assert.rejects(
+    driver.provisionHarness({
+      ...context,
+      revision: successor,
+      requirements: { ...requirements, labels: { "openclaw.dev/revision": successor.id } },
+    }),
+    /did not store the exact requested workload update/,
+  );
+  assert.equal(attemptedUpdate.expectedResourceVersion, "7");
+  assert.equal(attemptedUpdate.annotations["openclaw.dev/revision-id"], successor.id);
 });
 
 test("startup composes both OpenShell members from one Backend", async (t) => {
@@ -2872,17 +3002,34 @@ test("OpenShell holds withdrawn Codex authentication after a Harness restart", a
   }
 });
 
-for (const harnessId of ["codex", "openclaw"]) {
-  test(`OpenShell delivers ${harnessId} initial workspace files privately after supervisor readiness`, async (t) => {
+for (const [harnessId, workspaceMode] of [
+  ["codex", "operator"],
+  ["openclaw", "operator"],
+  ["codex", "managed"],
+  ["openclaw", "managed"],
+]) {
+  test(`OpenShell ${workspaceMode} delivers ${harnessId} initial workspace files privately after supervisor readiness`, async (t) => {
     const gatewayClient = workspaceGatewayClient();
-    const driver = new OpenShellSandboxDriver(sandboxInstallation().drivers.sandbox.configuration, {
+    const configuration = sandboxInstallation().drivers.sandbox.configuration;
+    const managed = workspaceMode === "managed";
+    if (managed) {
+      configuration.gateway = { workspaceMode };
+      configuration.kubernetes.sandboxDataMount.mountPath = "/sandbox/oce/workspace";
+    }
+    const Driver = managed ? ManagedOpenShellSandbox : OpenShellSandboxDriver;
+    const driver = new Driver(configuration, {
       id: "openshell-sandbox",
       implementation: "openshell",
       backend: backendFor(gatewayClient),
+      gatewayId: "test-gateway",
     });
     const { context, revision, requirements, prepared } = runtimeSandboxFixture(driver, {
       harnessId,
     });
+    if (managed) {
+      // Managed storage has no approved PVC mounts, including on setup retries.
+      requirements.workspaceMounts = [];
+    }
     const setup = {
       id: "initial-workspace",
       namespaceId: revision.namespaceId,
@@ -2942,12 +3089,25 @@ for (const harnessId of ["codex", "openclaw"]) {
 
     await provision();
     assert.equal(executions.length, 0, "private initialization waits for supervisor readiness");
-    assert.equal(prepared.length, harnessId === "openclaw" ? 1 : 0);
+    assert.equal(prepared.length, harnessId === "openclaw" && !managed ? 1 : 0);
     sandbox.phase = "SANDBOX_PHASE_READY";
     await provision();
     const execution = executions[0];
     assert.deepEqual(JSON.parse(execution.stdin), setup);
-    assert.equal(execution.environment.OPENCLAW_WORKSPACE_DIR, "/sandbox/enterprise");
+    assert.equal(
+      execution.environment.OPENCLAW_WORKSPACE_DIR,
+      managed ? "/sandbox/oce/workspace" : "/sandbox/enterprise",
+    );
+    assert.equal(execution.environment.HOME, "/sandbox/.openclaw-runtime/home");
+    assert.equal(
+      execution.environment.OPENCLAW_STATE_DIR,
+      "/sandbox/.openclaw-runtime/home/.openclaw",
+    );
+    // Updates deliver the completed setup record again to verify retained files.
+    setup.completed = true;
+    await provision();
+    assert.equal(JSON.parse(executions.at(-1).stdin).completed, true);
+    setup.completed = false;
     assert.equal(JSON.stringify(execution.command).includes(setup.files["AGENTS.md"]), false);
     assert.equal(JSON.stringify(sandbox).includes(setup.files["AGENTS.md"]), false);
     assert.equal(
@@ -3072,7 +3232,7 @@ for (const harnessId of ["codex", "openclaw"]) {
                   "--user",
                   `${process.getuid()}:${process.getgid()}`,
                   "--volume",
-                  `${workspace}:/sandbox/enterprise`,
+                  `${workspace}:${execution.environment.OPENCLAW_WORKSPACE_DIR}`,
                   "--volume",
                   `${home}:/sandbox/.openclaw-runtime/home`,
                   ...Object.entries(execution.environment).flatMap(([key, value]) => [

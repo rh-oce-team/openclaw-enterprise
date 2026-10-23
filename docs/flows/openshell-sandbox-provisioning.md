@@ -8,18 +8,15 @@ last_updated_session: authoring-run/8777cd8a-6832-4b9e-8fdd-51579d6b02d2
 
 ## Overview
 
-Kubernetes Compute delegates dedicated Codex/OpenClaw to OpenShell. Operator mode
-owns Namespace Workspaces; managed mode fails before mutation.
+Kubernetes Compute delegates dedicated Codex/OpenClaw to operator-mode OpenShell;
+the [managed prototype](openshell-managed-workload.md) has a separate lifecycle.
 [Credential sources](credential-source-lifecycle.md) provide model access without
 Agent Secret permission. Agent revision files and bearer passthrough authenticate Codex Gateway requests
 without a Harness Service.
 
-Development workspace-node setup uses a scoped token in its provider file.
-
 ## Entry Points
 
-- Trigger: a worker reconciles an Agent revision that selects the OpenShell
-  Sandbox Driver and Kubernetes Compute Driver.
+- Trigger: worker reconciliation with OpenShell Sandbox and Kubernetes Compute.
 - Source: `apps/controller/src/drivers/sandbox/openshell.ts:ensureNamespace`
 - Source: `apps/controller/src/drivers/sandbox/openshell.ts:provisionHarness`
 - Source: `apps/controller/src/drivers/compute/kubernetes/index.ts:prepareRevision`
@@ -154,7 +151,8 @@ managed-by labels, and active phase; conflicts fail preparation.
 
 `apps/controller/src/drivers/compute/kubernetes/index.ts:prepareRevision`
 
-Compute derives `provisionHarness` requirements from its ordinary Deployment.
+`KubernetesComputeDriver.harnessLaunch` builds inputs from prepared Agent data;
+`sandboxRequirements` adds operator-mode PVC mounts without parsing a Deployment.
 First deployment keeps the Agent Service inactive and Gateway transport fail-closed.
 Attachment and provider/Sandbox creation await Gateway readiness and its Agent-owned
 setup Secret, passed by reference. The local profile disables projected identity;
@@ -200,8 +198,7 @@ keys, old `passthrough` TLS spelling and missing executable paths fail before
 launch. Readiness `timeoutMs` requires a positive safe integer. Configuration errors
 prevent Kubernetes calls. Duplicate names and
 `workspace-node-enrollment` prevent Driver construction.
-The template includes the Harness Pod labels. The Gateway rejects the request if
-any label key is missing from `allowed_pod_labels`.
+The Gateway rejects Harness template labels absent from `allowed_pod_labels`.
 
 `provisionHarness` creates or adopts the provider with final setup. Renewal checks the provider version and updates only `node_setup_json` through `UpdateProvider`. For Codex, a configured post-create delay of at most 120 seconds precedes route exposure. Compute rolls the Gateway before checking enrollment.
 
@@ -382,6 +379,10 @@ model execution.
 - 2026-10-21 23:23: Record per-source retirement refusal in the accompanying worker change. (authoring-run/67a0706e-56ab-4514-adca-35cf217b0c3b - 7e5773662f34dc38be8138757ee47fd246bc3f9e)
 
 - 2026-10-21 23:06: Trace OCC delivery ownership and explicit withdrawal outcomes in the accompanying change. (authoring-run/785bc245-2a9c-4ebe-ad96-da5cdd3c4851 - 7e5773662f34dc38be8138757ee47fd246bc3f9e)
+
+- 2026-10-23 13:17: Describe direct Harness inputs. (authoring-run/2c3f5532-2023-4496-954f-df02d9be44c1 - bd4948208)
+
+- 2026-10-22 12:52: Link the separate managed lifecycle. (authoring-run/614bce75-0da5-4656-b1c3-6e8fc1740729 - 0505bb60ea905e4fe011616b41e5d1dcfc369bb4)
 
 - 2026-10-20 21:45: Pin OpenShell v0.1.5 and admit Harness template labels at the Gateway. (authoring-run/016ma8eD5SYoBTV5kswEV3Dn - bca5b199b)
 

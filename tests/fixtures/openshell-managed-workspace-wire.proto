@@ -1,0 +1,46 @@
+// Independent wire subset of OpenShell PR #4624 plus the local workload-update
+// extension investigated by TASK-0048. This is not a released API fixture.
+syntax = "proto3";
+package openshell.v1;
+
+service OpenShell {
+  rpc StopSandbox(StopSandboxRequest) returns (SandboxResponse);
+  rpc StartSandbox(StartSandboxRequest) returns (SandboxResponse);
+}
+service SandboxUpdates {
+  rpc UpdateSandbox(UpdateSandboxRequest) returns (SandboxResponse);
+}
+message WorkspaceSelector { string workspace = 1; }
+message StopSandboxRequest {
+  string name = 1;
+  WorkspaceSelector workspace_scope = 2;
+  string request_id = 3;
+}
+message StartSandboxRequest {
+  string name = 1;
+  WorkspaceSelector workspace_scope = 2;
+  string request_id = 3;
+}
+message SandboxCommandUpdate { repeated string argv = 1; }
+message SandboxMapUpdate { map<string, string> values = 1; }
+message UpdateSandboxRequest {
+  WorkspaceSelector workspace_scope = 1;
+  string name = 2;
+  optional string image = 3;
+  uint64 expected_resource_version = 4;
+  string request_id = 5;
+  SandboxCommandUpdate command = 6;
+  SandboxMapUpdate environment = 7;
+  SandboxMapUpdate labels = 8;
+  SandboxMapUpdate annotations = 9;
+}
+message ObjectMeta {
+  string id = 1;
+  string name = 2;
+  map<string, string> labels = 4;
+  uint64 resource_version = 5;
+  map<string, string> annotations = 6;
+  string workspace = 7;
+}
+message Sandbox { ObjectMeta metadata = 1; }
+message SandboxResponse { Sandbox sandbox = 1; }

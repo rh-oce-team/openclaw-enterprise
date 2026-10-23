@@ -8,9 +8,9 @@ saves the immutable Agent revision. [ComputeDriver](compute.md) owns the gateway
 identity, baseline isolation, routing, and activation. Sandbox can create a
 dedicated Harness while Compute keeps those responsibilities.
 
-Selection is optional and currently works only with bundled Kubernetes Compute
-and dedicated execution. Choosing an installed Sandbox does not enable Docker,
-SSH, or installed Compute combinations. See [Driver selection](selection.md).
+Selection is optional and requires bundled Kubernetes Compute with dedicated
+execution. Docker, SSH, and installed Compute combinations remain unsupported; see
+[Driver selection](selection.md).
 
 ## Interface
 
@@ -111,10 +111,17 @@ Console's **Live serving** show this status; Agent lists do not.
 
 `SandboxNamespaceContext` carries the Namespace, Compute's Kubernetes client,
 and a cancellation signal. `SandboxHarnessContext` adds the immutable Agent revision
-and `HarnessWorkloadRequirements`: image and startup command, Agent ServiceAccount,
-projected token audience/expiration/mount/path/read-only setting, approved PVC
-subpaths and mount modes, literal environment or Kubernetes `secretKeyRef`,
-explicit Harness login mode, `credentialAttachments`, and Agent and Agent revision labels.
+and `HarnessWorkloadRequirements`. Its `HarnessLaunchDescription` contains the
+image, command, optional projected identity, literal environment or `secretKeyRef`,
+login mode, files, credential attachments, labels and retained-directory intent.
+Compute constructs this before storage rendering. Each `retainedDirectories` entry
+names its purpose, stable storage name, Harness-local path and optional environment
+binding, without PVC identity.
+
+`workspaceMounts` adds approved Compute-owned PVC subpaths and mount modes.
+With `workspaceStorage: "provider"`, it is empty; the provider supplies retained
+directories. Identity specifies the ServiceAccount and token audience, expiration,
+mount path and read-only setting.
 Sandbox must use these prepared values rather than guessing login mode or
 resolving another credential.
 
@@ -137,8 +144,14 @@ gateway whether each attachment is applied before activating the Agent revision.
 ### Sandbox resource identity
 
 `SandboxResourceRef` contains `namespaceName`, `resourceName`, `agentId`, and
-`revisionId`. It stays stable when a controller replaces the underlying Pod;
-retirement must find the provider resource even if that Pod is already gone.
+`revisionId`. It survives Pod replacement or removal so retirement can find the
+provider resource.
+
+The [experimental managed Compute prototype](kubernetes-openshell-compute.md) uses
+`workspaceStorage: "provider"` to suppress Harness PVC operations, observe readiness
+through `observeHarness`, and confirm stop through `cleanup`.
+`workspaceNodeNamespaceLabels(context)` pairs its namespace selector with
+`workspaceNodePeerLabels`; it grants no namespace-wide Pod access.
 
 ## Optional network policy operations
 

@@ -67,6 +67,10 @@ status, and remaining design requirements.
 Within `packages/contracts/src/`, `runtime-logs.ts` owns runtime inspection and
 container/Sandbox log types. `index.ts` remains their public export entrypoint.
 
+`apps/controller/src/drivers/compute/kubernetes-openshell/` owns the experimental
+managed OpenShell Compute selection and its internal Sandbox lifecycle. It reuses
+the Kubernetes Gateway engine; see the [prototype boundary](reference/drivers/kubernetes-openshell-compute.md).
+
 Within controller composition, `installation-presets.ts` owns Preset file loading
 and bundled-version assembly; `installation-config.ts` owns Driver composition.
 

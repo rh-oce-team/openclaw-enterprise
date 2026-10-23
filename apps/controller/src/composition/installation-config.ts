@@ -73,6 +73,11 @@ import {
   PreprovisionedKubernetesNamespace,
   type KubernetesComputeDriverOptions,
 } from "../drivers/compute/kubernetes/index.ts";
+import {
+  KubernetesOpenShellComputeDriver,
+  ManagedOpenShellSandbox,
+  type KubernetesOpenShellComputeOptions,
+} from "../drivers/compute/kubernetes-openshell/index.ts";
 import { refuseRewrittenIpv4Host, refuseWrittenUserinfo } from "../auth/configuration.ts";
 import {
   createExternalDriver,
@@ -900,6 +905,27 @@ export async function loadInstallationConfiguration(options: {
       ? await loadBundledOpenShellSandboxDriver()
       : undefined;
 
+  const sandbox =
+    sandboxSelection === undefined
+      ? undefined
+      : selected(
+          sandboxSelection,
+          "sandbox",
+          sandboxPackage?.implementation ?? "openshell",
+          sandboxPackage?.module ?? bundledSandboxPackage!,
+        );
+  const managedOpenShellCompute =
+    kubernetesCompute &&
+    sandbox !== undefined &&
+    sandboxPackage === undefined &&
+    (sandbox.configuration as unknown as OpenShellSandboxDriverOptions).gateway.workspaceMode ===
+      "managed";
+  if (managedOpenShellCompute && options.createSandboxDriver !== undefined) {
+    throw new Error(
+      "Managed Kubernetes + OpenShell Compute requires its bundled Sandbox collaborator.",
+    );
+  }
+
   const configured = selected(
     configurationSelection,
     "configuration",
@@ -912,11 +938,22 @@ export async function loadInstallationConfiguration(options: {
     iamPackage?.implementation ?? "occ/native-iam",
     iamPackage?.module ?? NativeIAMDriver,
   );
+  const bundledCompute = [
+    {
+      enabled: managedOpenShellCompute,
+      implementation: "occ/kubernetes-openshell",
+      module: KubernetesOpenShellComputeDriver,
+    },
+    { enabled: sshCompute, implementation: "occ/ssh", module: SshComputeDriver },
+  ].find(({ enabled }) => enabled) ?? {
+    implementation: "occ/kubernetes",
+    module: KubernetesComputeDriver,
+  };
   const compute = selected(
     computeSelection,
     "compute",
-    computePackage?.implementation ?? (sshCompute ? "occ/ssh" : "occ/kubernetes"),
-    computePackage?.module ?? (sshCompute ? SshComputeDriver : KubernetesComputeDriver),
+    computePackage?.implementation ?? bundledCompute.implementation,
+    computePackage?.module ?? bundledCompute.module,
   );
   const secret = selected(
     secretSelection,
@@ -993,15 +1030,6 @@ export async function loadInstallationConfiguration(options: {
       },
     ]);
   }
-  const sandbox =
-    sandboxSelection === undefined
-      ? undefined
-      : selected(
-          sandboxSelection,
-          "sandbox",
-          sandboxPackage?.implementation ?? "openshell",
-          sandboxPackage?.module ?? bundledSandboxPackage!,
-        );
   if (sandbox?.package !== undefined && packageProxyId !== undefined) {
     // The package owns one startup configuration. Its Sandbox-only agent
     // contributions must not be registered a second time as Credential Proxy.
@@ -1189,7 +1217,16 @@ export async function loadInstallationConfiguration(options: {
         backend: openShell!,
         operatorOwnedKubernetesResources: preprovisionedNamespace !== undefined,
         createSandbox: (configuration, selection) =>
-          new bundledSandboxPackage!.OpenShellSandboxDriver(configuration, selection),
+          managedOpenShellCompute
+            ? new ManagedOpenShellSandbox(
+                configuration as unknown as OpenShellSandboxDriverOptions,
+                {
+                  ...selection,
+                  gatewayId: (compute.configuration as unknown as KubernetesOpenShellComputeOptions)
+                    .managedOpenShell.gatewayId,
+                },
+              )
+            : new bundledSandboxPackage!.OpenShellSandboxDriver(configuration, selection),
         repository: repositoryDelivery,
         proxy: {
           id: proxySelection.id,
@@ -1234,7 +1271,17 @@ export async function loadInstallationConfiguration(options: {
                   backend: openShell!,
                   operatorOwnedKubernetesResources: preprovisionedNamespace !== undefined,
                   createSandbox: (configuration, selection) =>
-                    new bundledSandboxPackage!.OpenShellSandboxDriver(configuration, selection),
+                    managedOpenShellCompute
+                      ? new ManagedOpenShellSandbox(
+                          configuration as unknown as OpenShellSandboxDriverOptions,
+                          {
+                            ...selection,
+                            gatewayId: (
+                              compute.configuration as unknown as KubernetesOpenShellComputeOptions
+                            ).managedOpenShell.gatewayId,
+                          },
+                        )
+                      : new bundledSandboxPackage!.OpenShellSandboxDriver(configuration, selection),
                   repository: repositoryDelivery,
                 });
                 repositoryTransport = capabilities.repositoryTransport;
@@ -1271,28 +1318,34 @@ export async function loadInstallationConfiguration(options: {
       },
     );
   } else {
-    computeDriver = new KubernetesComputeDriver(
-      compute.configuration as unknown as KubernetesComputeDriverOptions,
-      {
-        id: compute.id,
-        implementation: compute.implementation,
-        lifecycleDrivers: [configurationDriver],
-        ...(sandboxDriver === undefined ? {} : { sandboxDriver }),
-        ...(credentialGatewayDriver === undefined ? {} : { credentialGatewayDriver }),
-        ...(protectedDriver === undefined ? {} : { protectedDriver }),
-        preparedTokens: tokenService,
-        ...(preparedRepositoryGit === undefined || repositoryTransport || repositoryGitDriver
-          ? {}
-          : { preparedRepositoryIngress: true }),
-        preprovisionedNamespace,
-        nodeEnrollment: createGatewayNodeEnrollment(() =>
-          readWorkspaceFilesApiKey(
-            nonempty(environment.OCC_GATEWAY_API_KEY_PATH, "OCC_GATEWAY_API_KEY_PATH"),
-          ),
+    const selection: NonNullable<ConstructorParameters<typeof KubernetesComputeDriver>[1]> = {
+      id: compute.id,
+      implementation: compute.implementation,
+      lifecycleDrivers: [configurationDriver],
+      ...(sandboxDriver === undefined ? {} : { sandboxDriver }),
+      ...(credentialGatewayDriver === undefined ? {} : { credentialGatewayDriver }),
+      ...(protectedDriver === undefined ? {} : { protectedDriver }),
+      preparedTokens: tokenService,
+      ...(preparedRepositoryGit === undefined || repositoryTransport || repositoryGitDriver
+        ? {}
+        : { preparedRepositoryIngress: true }),
+      preprovisionedNamespace,
+      nodeEnrollment: createGatewayNodeEnrollment(() =>
+        readWorkspaceFilesApiKey(
+          nonempty(environment.OCC_GATEWAY_API_KEY_PATH, "OCC_GATEWAY_API_KEY_PATH"),
         ),
-        readNodeCa: () => readHarnessNodeCa(environment),
-      },
-    );
+      ),
+      readNodeCa: () => readHarnessNodeCa(environment),
+    };
+    computeDriver = managedOpenShellCompute
+      ? new KubernetesOpenShellComputeDriver(
+          compute.configuration as unknown as KubernetesOpenShellComputeOptions,
+          { ...selection, sandboxDriver: sandboxDriver as ManagedOpenShellSandbox },
+        )
+      : new KubernetesComputeDriver(
+          compute.configuration as unknown as KubernetesComputeDriverOptions,
+          selection,
+        );
   }
   const createIAMDriver = (state: NativeIAMStateStore): IAMDriver => {
     return iamPackage === undefined

@@ -830,7 +830,7 @@ function isManagedRuntimeProfile(profile: OpenShellStoredProviderProfile): boole
   );
 }
 
-interface WorkspaceNodeBinding {
+export interface WorkspaceNodeBinding {
   readonly host: string;
   readonly port: number;
   readonly path: string;
@@ -1030,18 +1030,18 @@ function namespaceName(namespace: Readonly<Namespace>): string {
   return nonempty(namespace.name, "Kubernetes namespace name");
 }
 
-function workspaceName(namespace: Readonly<Namespace>): string {
+export function workspaceName(namespace: Readonly<Namespace>): string {
   return openShellWorkspaceName(namespace);
 }
 
-function workspaceLabels(namespace: Readonly<Namespace>): Readonly<Record<string, string>> {
+export function workspaceLabels(namespace: Readonly<Namespace>): Readonly<Record<string, string>> {
   return Object.freeze({
     [OPENSHELL_MANAGED_BY_LABEL]: OPENSHELL_MANAGED_BY,
     [OPENSHELL_NAMESPACE_ID_LABEL]: nonempty(namespace.id, "OCC Namespace ID"),
   });
 }
 
-function verifyWorkspaceOwnership(
+export function verifyWorkspaceOwnership(
   workspace: OpenShellWorkspaceResponse,
   namespace: Readonly<Namespace>,
 ): void {
@@ -1057,7 +1057,7 @@ function verifyWorkspaceOwnership(
   }
 }
 
-function verifyActiveWorkspace(
+export function verifyActiveWorkspace(
   workspace: OpenShellWorkspaceResponse,
   namespace: Readonly<Namespace>,
 ): void {
@@ -1285,7 +1285,7 @@ function relocatedWorkspaceMountPath(mount: {
   )}`;
 }
 
-function sandboxCommand(
+export function sandboxCommand(
   command: readonly string[],
   links: readonly OpenShellWorkspaceLink[],
   native: boolean,
@@ -2216,26 +2216,73 @@ function sandboxSpec(
     },
     volumes: workspace.volumes,
   };
+  return sandboxLaunchSpec(
+    options,
+    revision,
+    requirements,
+    {
+      workspacePath: dataMount.mount_path,
+      workspaceMountPaths: workspace.workspaceMountPaths,
+      driverConfig,
+      filesystem: filesystemPolicy(options, dataMount, volumeMounts),
+      command: sandboxCommand(
+        requirements.command,
+        workspace.links,
+        revision.harness.id === "openclaw",
+        requirements.loginMode,
+        requirements.workspaceSetup,
+      ),
+    },
+    runtimeProvider,
+    providerEnvironment,
+    workspaceNodeBinding,
+    egressPolicy,
+  );
+}
+
+interface OpenShellHarnessLayout {
+  readonly templateLabels?: Readonly<Record<string, string>>;
+  readonly workspacePath: string;
+  readonly workspaceMountPaths?: ReadonlyMap<string, string>;
+  readonly environment?: Readonly<Record<string, string>>;
+  readonly driverConfig: Readonly<Record<string, unknown>>;
+  readonly filesystem: ReturnType<typeof filesystemPolicy>;
+  readonly command: readonly string[];
+}
+
+function sandboxLaunchSpec(
+  options: OpenShellSandboxDriverOptions,
+  revision: Readonly<AgentRevision>,
+  requirements: HarnessWorkloadRequirements,
+  layout: OpenShellHarnessLayout,
+  runtimeProvider?: string,
+  providerEnvironment: ReadonlySet<string> = new Set(),
+  workspaceNodeBinding?: WorkspaceNodeBinding,
+  egressPolicy?: Readonly<Record<string, unknown>>,
+) {
   return {
     log_level: options.logLevel ?? "info",
-    environment: environment(
-      requirements,
-      providerEnvironment,
-      dataMount.mount_path,
-      workspace.workspaceMountPaths,
-    ),
+    environment: {
+      ...environment(
+        requirements,
+        providerEnvironment,
+        layout.workspacePath,
+        layout.workspaceMountPaths,
+      ),
+      ...layout.environment,
+    },
     template: {
       image: requirements.image,
       runtime_class_name: options.kubernetes.runtimeClassName,
-      labels: { ...requirements.labels },
-      driver_config: { fields: toProtobufStruct({ kubernetes: driverConfig }) },
+      labels: { ...(layout.templateLabels ?? requirements.labels) },
+      driver_config: { fields: toProtobufStruct({ kubernetes: layout.driverConfig }) },
       ...(options.kubernetes.userNamespaces === undefined
         ? {}
         : { user_namespaces: options.kubernetes.userNamespaces }),
     },
     policy: {
       version: 1,
-      filesystem: filesystemPolicy(options, dataMount, volumeMounts),
+      filesystem: layout.filesystem,
       landlock: { compatibility: "hard_requirement" },
       process: {
         run_as_user: options.policy.process.runAsUser,
@@ -2256,13 +2303,7 @@ function sandboxSpec(
       },
     },
     providers: sandboxProviders(options, requirements, runtimeProvider),
-    command: sandboxCommand(
-      requirements.command,
-      workspace.links,
-      revision.harness.id === "openclaw",
-      requirements.loginMode,
-      requirements.workspaceSetup,
-    ),
+    command: layout.command,
     restart_policy: SANDBOX_RESTART_POLICY,
   };
 }
@@ -2686,7 +2727,7 @@ function withoutSyntheticOneofs(
   );
 }
 
-function canonicalSandboxSpec(spec: Readonly<Record<string, unknown>> | undefined): unknown {
+export function canonicalSandboxSpec(spec: Readonly<Record<string, unknown>> | undefined): unknown {
   const template = asRecord(spec?.template);
   if (spec === undefined || template === undefined) {
     return spec;
@@ -2763,7 +2804,7 @@ function runtimeProviderSetupEnvelope(
   };
 }
 
-function runtimeProviderSetupUpdate(
+export function runtimeProviderSetupUpdate(
   provider: OpenShellProviderResponse,
   name: string,
   profileId: string,
@@ -2861,7 +2902,7 @@ export class OpenShellSandboxDriver implements SandboxDriver {
   readonly harnessHome = OPENSHELL_HOME;
   static readonly configurationContributions = configurationContributions;
   readonly networkPolicy = Object.freeze({ wildcards: true, portRanges: true, live: true });
-  private readonly options: OpenShellSandboxDriverOptions;
+  protected readonly options: OpenShellSandboxDriverOptions;
   private readonly backend: Backend<OpenShellGateway>;
   private readonly operatorOwnedKubernetesResources: boolean;
   private readonly openShellGit: OpenShellGitRuntime | undefined;
@@ -3266,15 +3307,12 @@ export class OpenShellSandboxDriver implements SandboxDriver {
       "openclaw.dev/revision-id": context.revision.id,
     };
     const selector = { name: sandbox.resourceName, workspace };
-    const requestIds = createRequestIds(context.revision.id);
     const create = {
       ...selector,
       labels: context.requirements.labels,
       annotations,
-      spec: sandboxSpec(
-        this.options,
-        context.revision,
-        context.requirements,
+      spec: this.harnessSpec(
+        context,
         runtimeProvider,
         new Set([
           WORKSPACE_NODE_SETUP_ENVIRONMENT,
@@ -3290,6 +3328,7 @@ export class OpenShellSandboxDriver implements SandboxDriver {
       ),
       serviceExposures,
     };
+    const requestIds = createRequestIds(context.revision.id);
     if (git) {
       create.spec.providers.push(git.provider);
       Object.assign(
@@ -3335,6 +3374,67 @@ export class OpenShellSandboxDriver implements SandboxDriver {
             },
           }),
     });
+    return this.reconcileHarness(context, result, create, git?.existingSandboxId);
+  }
+
+  protected harnessSpec(
+    context: SandboxHarnessContext,
+    runtimeProvider: string,
+    providerEnvironment: ReadonlySet<string>,
+    binding?: WorkspaceNodeBinding,
+    egressPolicy?: Readonly<Record<string, unknown>>,
+  ) {
+    return sandboxSpec(
+      this.options,
+      context.revision,
+      context.requirements,
+      runtimeProvider,
+      providerEnvironment,
+      binding,
+      egressPolicy,
+    );
+  }
+
+  protected harnessSpecForLayout(
+    context: SandboxHarnessContext,
+    runtimeProvider: string,
+    providerEnvironment: ReadonlySet<string>,
+    binding: WorkspaceNodeBinding | undefined,
+    layout: OpenShellHarnessLayout,
+  ) {
+    return sandboxLaunchSpec(
+      this.options,
+      context.revision,
+      context.requirements,
+      layout,
+      runtimeProvider,
+      providerEnvironment,
+      binding,
+      context.revision.egressPlan === undefined
+        ? undefined
+        : protectedEgressPolicy(this.options, context.requirements),
+    );
+  }
+
+  protected harnessFilesystemPolicy(
+    workspacePath: string,
+    mounts: readonly { readonly mount_path: string; readonly read_only: boolean }[],
+  ) {
+    return filesystemPolicy(this.options, { mount_path: workspacePath, read_only: false }, mounts);
+  }
+
+  protected async reconcileHarness(
+    context: SandboxHarnessContext,
+    sandbox: SandboxResourceRef,
+    create: Omit<OpenShellSandboxCreateRequest, "requestId">,
+    existingSandboxId?: string,
+  ): Promise<SandboxResourceRef> {
+    const client = this.gatewayClientForNamespace(sandbox.namespaceName);
+    const workspace = workspaceName(context.namespace);
+    const selector = { name: sandbox.resourceName, workspace };
+    const requestIds = createRequestIds(context.revision.id);
+    const codex = context.revision.harness.id === "codex";
+    const exposed = exposesHarnessPort(context.requirements, codex);
     // Every reconcile pass reaches here. Re-sending CreateSandbox for a Sandbox that
     // exists would hit the gateway's request_id replay, which refuses a changed spec
     // (REQUEST_ID_PAYLOAD_MISMATCH) and forgets the create after 24 h (ALREADY_EXISTS).
@@ -3347,7 +3447,7 @@ export class OpenShellSandboxDriver implements SandboxDriver {
       `Sandbox ${sandbox.resourceName} cannot be created or adopted`,
     );
     let existing = await refused(() => client.getSandbox(selector, context.signal));
-    if (git?.existingSandboxId && existing?.id !== git.existingSandboxId) {
+    if (existingSandboxId && existing?.id !== existingSandboxId) {
       throw new OpenShellSandboxConfigurationFailure(
         "The standing Git execution is no longer present.",
       );
@@ -3416,7 +3516,7 @@ export class OpenShellSandboxDriver implements SandboxDriver {
           await delay(this.options.startupDelayMs, undefined, { signal: context.signal });
         }
         await this.initializeWorkspace(context, sandbox, client);
-        return result;
+        return sandbox;
       }
       existing = await refused(() => client.getSandbox(selector, context.signal));
       if (existing === undefined && alreadyExists) {
@@ -3458,7 +3558,7 @@ export class OpenShellSandboxDriver implements SandboxDriver {
       validateHarnessServiceUrl(service.url);
     }
     await this.initializeWorkspace(context, sandbox, client);
-    return result;
+    return sandbox;
   }
 
   /** OpenShell labels the supervisor and workload Pods as one boundary pair. Keep both
@@ -3729,7 +3829,7 @@ export class OpenShellSandboxDriver implements SandboxDriver {
     );
   }
 
-  private async withdrawNativeExposure(
+  protected async withdrawNativeExposure(
     client: OpenShellGatewayClient,
     workspace: string,
     sandbox: string,
@@ -3763,7 +3863,11 @@ export class OpenShellSandboxDriver implements SandboxDriver {
     }
   }
 
-  private async initializeWorkspace(
+  protected workspaceInitializationPath(context: SandboxHarnessContext): string {
+    return sandboxDataMount(this.options, context.requirements).mount_path;
+  }
+
+  protected async initializeWorkspace(
     context: SandboxHarnessContext,
     sandbox: SandboxResourceRef,
     client: OpenShellGatewayClient,
@@ -3823,7 +3927,7 @@ export class OpenShellSandboxDriver implements SandboxDriver {
           environment: {
             HOME: OPENSHELL_HOME,
             OPENCLAW_STATE_DIR: `${OPENSHELL_HOME}/.openclaw`,
-            OPENCLAW_WORKSPACE_DIR: sandboxDataMount(this.options, context.requirements).mount_path,
+            OPENCLAW_WORKSPACE_DIR: this.workspaceInitializationPath(context),
             OPENCLAW_EXECUTABLE: "/app/openclaw.mjs",
           },
           stdin: value,
@@ -4550,7 +4654,7 @@ export class OpenShellSandboxDriver implements SandboxDriver {
     this.backend.client.close();
   }
 
-  private gatewayClientForNamespace(namespace: string): OpenShellGatewayClient {
+  protected gatewayClientForNamespace(namespace: string): OpenShellGatewayClient {
     return this.backend.client.clientForNamespace(namespace);
   }
 
@@ -4597,7 +4701,7 @@ export class OpenShellSandboxDriver implements SandboxDriver {
     }
   }
 
-  private async ensureRuntimeProvider(
+  protected async ensureRuntimeProvider(
     client: OpenShellGatewayClient,
     workspace: string,
     context: SandboxHarnessContext,
@@ -4657,7 +4761,7 @@ export class OpenShellSandboxDriver implements SandboxDriver {
     return Object.freeze({ name, created });
   }
 
-  private async deleteRuntimeProfileIfUnused(
+  protected async deleteRuntimeProfileIfUnused(
     client: OpenShellGatewayClient,
     workspace: string,
     profileId: string,
@@ -4679,7 +4783,7 @@ export class OpenShellSandboxDriver implements SandboxDriver {
     await client.deleteProviderProfile(workspace, profileId, signal);
   }
 
-  private requireOperatorWorkspaceMode(operation: string): void {
+  protected requireOperatorWorkspaceMode(operation: string): void {
     if (this.options.gateway.workspaceMode === "managed") {
       throw new OpenShellSandboxConfigurationFailure(
         `OpenShell managed workspace mode is not implemented; cannot ${operation}.`,
@@ -4693,7 +4797,7 @@ export class OpenShellSandboxDriver implements SandboxDriver {
     return this.sandboxRef(context);
   }
 
-  private sandboxRef(
+  protected sandboxRef(
     context: Pick<SandboxHarnessContext, "namespace" | "revision">,
   ): SandboxResourceRef {
     const prefix = this.options.sandboxNamePrefix ?? DEFAULT_SANDBOX_NAME_PREFIX;
