@@ -71,7 +71,7 @@ Use `npm run docs:build` for the full static build. See the
 
 ## Contributors
 
-Thanks to everyone contributing code, documentation, reviews, and ideas.
+Thanks to everyone who contributes code, documentation, reviews, and ideas.
 See the [full contributor graph](https://github.com/openclaw/openclaw-enterprise/graphs/contributors)
 and [how to update recognition](CONTRIBUTING.md#recognize-contributors).
 
